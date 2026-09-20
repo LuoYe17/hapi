@@ -1558,7 +1558,6 @@ it('resolves relative directory against cwd (MCP session working directory)', as
         })
     })
 
-<<<<<<< HEAD
     it('maps Codex and OpenCode effort overrides to modelReasoningEffort', async () => {
         let spawnedBody: Record<string, unknown> | undefined
         const http = createHttpMock({
