@@ -13,7 +13,7 @@
  */
 
 import { existsSync, statSync } from 'node:fs'
-import { resolve as resolvePath } from 'node:path'
+import { posix, resolve as resolvePath, win32 } from 'node:path'
 import axios, { type AxiosInstance } from 'axios'
 import { isObject, SESSION_NAME_MAX_LENGTH } from '@hapi/protocol'
 import {
@@ -330,6 +330,31 @@ function assertLocalSpawnDirectory(directory: string): void {
     }
 }
 
+/**
+ * True when `value` is absolute on POSIX or Windows.
+ * Caller-platform `path.resolve` must not rewrite foreign absolute roots
+ * (Linux→`C:\repo`, Windows→`/srv/repo`) before cross-host spawn.
+ */
+export function isCrossPlatformAbsolutePath(value: string): boolean {
+    return posix.isAbsolute(value) || win32.isAbsolute(value)
+}
+
+/**
+ * Resolve spawn `directory` for CLI/MCP.
+ * Preserve absolute paths on either OS; resolve only relative paths against
+ * `cwd` (MCP session tree) or `process.cwd()`.
+ */
+export function resolveSpawnPeerDirectory(rawDirectory: string, cwd?: string): string {
+    const trimmed = rawDirectory.trim()
+    if (!trimmed) {
+        return trimmed
+    }
+    if (isCrossPlatformAbsolutePath(trimmed)) {
+        return trimmed
+    }
+    return cwd ? resolvePath(cwd, trimmed) : resolvePath(trimmed)
+}
+
 async function fetchHubPeerSpawnDefaults(
     apiUrl: string,
     jwt: string,
@@ -442,11 +467,10 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
         throw new SpawnPeerError('bad_args', 'directory is required')
     }
     // Runner RPC resolves relative paths against the long-lived runner cwd
-    // (`hapi runner start`), not the calling CLI/MCP process. Anchor here.
-    // MCP callers pass cwd=session workingDirectory so "." is the session tree.
-    const directory = options.cwd
-        ? resolvePath(options.cwd, rawDirectory)
-        : resolvePath(rawDirectory)
+    // (`hapi runner start`), not the calling CLI/MCP process. Anchor relative
+    // paths here (MCP passes cwd=session workingDirectory). Preserve absolute
+    // POSIX/Windows paths so cross-host spawns are not mangled by the caller OS.
+    const directory = resolveSpawnPeerDirectory(rawDirectory, options.cwd)
 
     const parent = options.parent !== undefined
         ? options.parent

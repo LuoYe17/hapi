@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
     SpawnPeerError,
     exitCodeForSpawnPeerError,
+    isCrossPlatformAbsolutePath,
+    resolveSpawnPeerDirectory,
     spawnPeer
 } from './spawnPeer'
 
@@ -77,6 +79,43 @@ function userMessageRow(text: string) {
         content: { role: 'user', content: { text } }
     }
 }
+
+describe('resolveSpawnPeerDirectory', () => {
+    it('detects POSIX and Windows absolute paths on either host OS', () => {
+        expect(isCrossPlatformAbsolutePath('/srv/repo')).toBe(true)
+        expect(isCrossPlatformAbsolutePath('C:\\Users\\ops\\repo')).toBe(true)
+        expect(isCrossPlatformAbsolutePath('C:/Users/ops/repo')).toBe(true)
+        expect(isCrossPlatformAbsolutePath('\\\\server\\share')).toBe(true)
+        expect(isCrossPlatformAbsolutePath('relative/dir')).toBe(false)
+        expect(isCrossPlatformAbsolutePath('.')).toBe(false)
+    })
+
+    it('preserves foreign absolute roots and only resolves relative paths', () => {
+        expect(resolveSpawnPeerDirectory('C:\\Users\\ops\\repo', '/home/agent')).toBe(
+            'C:\\Users\\ops\\repo'
+        )
+        expect(resolveSpawnPeerDirectory('/srv/repo', 'C:\\Users\\ops\\session')).toBe('/srv/repo')
+        expect(resolveSpawnPeerDirectory('peer-dir', '/repo-b')).toBe(resolve('/repo-b', 'peer-dir'))
+        expect(resolveSpawnPeerDirectory('.', '/repo-b')).toBe(resolve('/repo-b', '.'))
+    })
+})
+
+describe('resolveSpawnPeerDirectory', () => {
+    it('preserves Windows and POSIX absolute paths without caller-platform resolve', () => {
+        expect(isCrossPlatformAbsolutePath('C:\\repo')).toBe(true)
+        expect(isCrossPlatformAbsolutePath('/srv/repo')).toBe(true)
+        expect(isCrossPlatformAbsolutePath('relative/dir')).toBe(false)
+        expect(resolveSpawnPeerDirectory('C:\\repo')).toBe('C:\\repo')
+        expect(resolveSpawnPeerDirectory('/srv/repo')).toBe('/srv/repo')
+        expect(resolveSpawnPeerDirectory('C:\\repo', '/home/caller')).toBe('C:\\repo')
+        expect(resolveSpawnPeerDirectory('/srv/repo', 'C:\\caller')).toBe('/srv/repo')
+    })
+
+    it('resolves relative paths against cwd or process.cwd()', () => {
+        expect(resolveSpawnPeerDirectory('relative-peer-dir')).toBe(resolve('relative-peer-dir'))
+        expect(resolveSpawnPeerDirectory('nested', '/base')).toBe(resolve('/base', 'nested'))
+    })
+})
 
 describe('spawnPeer', () => {
     let nowMs: number
@@ -688,6 +727,127 @@ it('resolves relative directory against cwd (MCP session working directory)', as
         })
 
         expect(spawnedBody?.directory).toBe(resolve('relative-peer-dir'))
+    })
+
+    it('preserves a Windows absolute directory for cross-host spawn (no Linux resolve)', async () => {
+        const REMOTE_ID = 'win-runner-1'
+        const LOCAL_ID = 'linux-local'
+        const winDir = 'C:\\Users\\ops\\coding\\hapi'
+        let spawnedBody: Record<string, unknown> | undefined
+        const http = createHttpMock({
+            post: (url, body) => {
+                if (url.endsWith('/api/auth')) {
+                    return { status: 200, data: { token: 'jwt' } }
+                }
+                if (url.endsWith(`/api/machines/${REMOTE_ID}/spawn`)) {
+                    spawnedBody = body as Record<string, unknown>
+                    return { status: 200, data: { type: 'success', sessionId: SESSION_ID } }
+                }
+                if (url.endsWith(`/api/sessions/${SESSION_ID}/messages`)) {
+                    return { status: 200, data: { ok: true } }
+                }
+                throw new Error(`unexpected POST ${url}`)
+            },
+            get: (url) => {
+                if (url.endsWith('/api/machines')) {
+                    return {
+                        status: 200,
+                        data: {
+                            machines: [{ id: REMOTE_ID, hostname: 'teemo-win', metadata: { host: 'teemo-win' } }]
+                        }
+                    }
+                }
+                if (url.endsWith(`/api/sessions/${SESSION_ID}`)) {
+                    return {
+                        status: 200,
+                        data: {
+                            session: {
+                                id: SESSION_ID,
+                                active: true,
+                                metadata: { name: 'WinPeer', flavor: 'claude' }
+                            }
+                        }
+                    }
+                }
+                if (url.includes(`/api/sessions/${SESSION_ID}/messages`)) {
+                    return {
+                        status: 200,
+                        data: { messages: [userMessageRow('brief')] }
+                    }
+                }
+                throw new Error(`unexpected GET ${url}`)
+            }
+        })
+
+        await spawnPeer({
+            directory: winDir,
+            message: 'brief',
+            machine: 'teemo-win',
+            localMachineId: LOCAL_ID,
+            accessToken: 'tok',
+            apiUrl: 'http://hub.test',
+            http: http as never,
+            hubPeerSpawnDefaults: null,
+            cwd: '/home/agent/session',
+        })
+
+        expect(spawnedBody?.directory).toBe(winDir)
+        expect(String(spawnedBody?.directory)).not.toContain('/home/agent/session')
+    })
+
+    it('preserves a POSIX absolute directory even when cwd is set (Windows-caller case)', async () => {
+        let spawnedBody: Record<string, unknown> | undefined
+        const http = createHttpMock({
+            post: (url, body) => {
+                if (url.endsWith('/api/auth')) {
+                    return { status: 200, data: { token: 'jwt' } }
+                }
+                if (url.endsWith(`/api/machines/${MACHINE_ID}/spawn`)) {
+                    spawnedBody = body as Record<string, unknown>
+                    return { status: 200, data: { type: 'success', sessionId: SESSION_ID } }
+                }
+                if (url.endsWith(`/api/sessions/${SESSION_ID}/messages`)) {
+                    return { status: 200, data: { ok: true } }
+                }
+                throw new Error(`unexpected POST ${url}`)
+            },
+            get: (url) => {
+                if (url.endsWith(`/api/sessions/${SESSION_ID}`)) {
+                    return {
+                        status: 200,
+                        data: {
+                            session: {
+                                id: SESSION_ID,
+                                active: true,
+                                metadata: { name: 'PosixPeer', flavor: 'claude' }
+                            }
+                        }
+                    }
+                }
+                if (url.includes(`/api/sessions/${SESSION_ID}/messages`)) {
+                    return {
+                        status: 200,
+                        data: { messages: [userMessageRow('brief')] }
+                    }
+                }
+                throw new Error(`unexpected GET ${url}`)
+            }
+        })
+
+        await spawnPeer({
+            directory: '/srv/repo',
+            message: 'brief',
+            machineId: MACHINE_ID,
+            // Pretend local machine differs so we skip local existsSync
+            localMachineId: 'other-machine',
+            accessToken: 'tok',
+            apiUrl: 'http://hub.test',
+            http: http as never,
+            hubPeerSpawnDefaults: null,
+            cwd: 'C:\\Users\\ops\\session',
+        })
+
+        expect(spawnedBody?.directory).toBe('/srv/repo')
     })
 
     it('does not archive when ping-peer delivery throws and transcript cannot be verified', async () => {
@@ -1708,6 +1868,68 @@ it('resolves relative directory against cwd (MCP session working directory)', as
         expect(exitCodeForSpawnPeerError(new SpawnPeerError('empty_session', 'x'))).toBe(4)
         expect(exitCodeForSpawnPeerError(new SpawnPeerError('verify_failed', 'x'))).toBe(4)
         expect(exitCodeForSpawnPeerError(new SpawnPeerError('send_failed', 'x'))).toBe(4)
+    })
+
+    it('preserves Windows absolute directory when spawning from a POSIX caller', async () => {
+        const REMOTE_ID = '5f5a87e8-25b2-4732-ba4c-aba95f695bd7'
+        const LOCAL_ID = 'local-machine-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+        let spawnedBody: Record<string, unknown> | undefined
+        const http = createHttpMock({
+            post: (url, body) => {
+                if (url.endsWith('/api/auth')) {
+                    return { status: 200, data: { token: 'jwt' } }
+                }
+                if (typeof url === 'string' && url.includes('/api/machines/') && url.endsWith('/spawn')) {
+                    spawnedBody = body as Record<string, unknown>
+                    return { status: 200, data: { type: 'success', sessionId: SESSION_ID } }
+                }
+                if (url.endsWith(`/api/sessions/${SESSION_ID}/messages`)) {
+                    return { status: 200, data: { ok: true } }
+                }
+                throw new Error(`unexpected POST ${url}`)
+            },
+            get: (url) => {
+                if (url.endsWith('/api/machines')) {
+                    return {
+                        status: 200,
+                        data: {
+                            machines: [{
+                                id: REMOTE_ID,
+                                metadata: { host: 'teemo' },
+                            }],
+                        },
+                    }
+                }
+                if (url.includes(`/api/sessions/${SESSION_ID}/messages`)) {
+                    return { status: 200, data: { messages: [userMessageRow('do the work')] } }
+                }
+                if (url.includes('/api/sessions')) {
+                    return {
+                        status: 200,
+                        data: {
+                            sessions: [{ id: SESSION_ID, active: true, metadata: { flavor: 'claude' } }],
+                            session: { id: SESSION_ID, active: true, metadata: { flavor: 'claude' } },
+                        },
+                    }
+                }
+                throw new Error(`unexpected GET ${url}`)
+            },
+        })
+
+        await spawnPeer({
+            directory: 'C:\\repo',
+            message: 'do the work',
+            machine: 'teemo',
+            localMachineId: LOCAL_ID,
+            accessToken: 'tok',
+            apiUrl: 'http://hub.test',
+            http: http as never,
+            hubPeerSpawnDefaults: null,
+        })
+
+        expect(spawnedBody?.directory).toBe('C:\\repo')
+        // Caller cwd must not prefix the Windows root (the bug this guards).
+        expect(String(spawnedBody?.directory)).not.toContain(resolve('.'))
     })
 
     it('resolves machine hostname via GET /api/machines and spawns there', async () => {
