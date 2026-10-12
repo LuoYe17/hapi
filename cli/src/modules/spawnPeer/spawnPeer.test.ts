@@ -86,34 +86,41 @@ describe('resolveSpawnPeerDirectory', () => {
         expect(isCrossPlatformAbsolutePath('C:\\Users\\ops\\repo')).toBe(true)
         expect(isCrossPlatformAbsolutePath('C:/Users/ops/repo')).toBe(true)
         expect(isCrossPlatformAbsolutePath('\\\\server\\share')).toBe(true)
+        expect(isCrossPlatformAbsolutePath('\\repo')).toBe(true)
         expect(isCrossPlatformAbsolutePath('relative/dir')).toBe(false)
         expect(isCrossPlatformAbsolutePath('.')).toBe(false)
     })
 
-    it('preserves foreign absolute roots and only resolves relative paths', () => {
-        expect(resolveSpawnPeerDirectory('C:\\Users\\ops\\repo', '/home/agent')).toBe(
-            'C:\\Users\\ops\\repo'
-        )
-        expect(resolveSpawnPeerDirectory('/srv/repo', 'C:\\Users\\ops\\session')).toBe('/srv/repo')
-        expect(resolveSpawnPeerDirectory('peer-dir', '/repo-b')).toBe(resolve('/repo-b', 'peer-dir'))
-        expect(resolveSpawnPeerDirectory('.', '/repo-b')).toBe(resolve('/repo-b', '.'))
-    })
-})
-
-describe('resolveSpawnPeerDirectory', () => {
-    it('preserves Windows and POSIX absolute paths without caller-platform resolve', () => {
-        expect(isCrossPlatformAbsolutePath('C:\\repo')).toBe(true)
-        expect(isCrossPlatformAbsolutePath('/srv/repo')).toBe(true)
-        expect(isCrossPlatformAbsolutePath('relative/dir')).toBe(false)
-        expect(resolveSpawnPeerDirectory('C:\\repo')).toBe('C:\\repo')
-        expect(resolveSpawnPeerDirectory('/srv/repo')).toBe('/srv/repo')
-        expect(resolveSpawnPeerDirectory('C:\\repo', '/home/caller')).toBe('C:\\repo')
-        expect(resolveSpawnPeerDirectory('/srv/repo', 'C:\\caller')).toBe('/srv/repo')
+    it('preserves foreign absolute roots for cross-host; resolves relative against cwd', () => {
+        expect(resolveSpawnPeerDirectory('C:\\Users\\ops\\repo', {
+            cwd: '/home/agent',
+            crossHost: true,
+        })).toBe('C:\\Users\\ops\\repo')
+        expect(resolveSpawnPeerDirectory('/srv/repo', {
+            cwd: 'C:\\Users\\ops\\session',
+            crossHost: true,
+        })).toBe('/srv/repo')
+        expect(resolveSpawnPeerDirectory('peer-dir', {
+            cwd: '/repo-b',
+            crossHost: true,
+        })).toBe(resolve('/repo-b', 'peer-dir'))
+        expect(resolveSpawnPeerDirectory('.', {
+            cwd: '/repo-b',
+            crossHost: false,
+        })).toBe(resolve('/repo-b', '.'))
     })
 
-    it('resolves relative paths against cwd or process.cwd()', () => {
-        expect(resolveSpawnPeerDirectory('relative-peer-dir')).toBe(resolve('relative-peer-dir'))
-        expect(resolveSpawnPeerDirectory('nested', '/base')).toBe(resolve('/base', 'nested'))
+    it('uses native resolve for local spawn so Windows drive-less rooted paths bind to cwd drive', () => {
+        // On any host OS, native path.resolve against a Windows cwd drive-prefixes `\repo`.
+        expect(resolveSpawnPeerDirectory('\\repo', {
+            cwd: 'D:\\work\\session',
+            crossHost: false,
+        })).toBe(resolve('D:\\work\\session', '\\repo'))
+        // Cross-host keeps the drive-less root for the target Windows runner.
+        expect(resolveSpawnPeerDirectory('\\repo', {
+            cwd: 'D:\\work\\session',
+            crossHost: true,
+        })).toBe('\\repo')
     })
 })
 

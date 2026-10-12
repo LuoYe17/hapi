@@ -332,24 +332,36 @@ function assertLocalSpawnDirectory(directory: string): void {
 
 /**
  * True when `value` is absolute on POSIX or Windows.
- * Caller-platform `path.resolve` must not rewrite foreign absolute roots
- * (Linux→`C:\repo`, Windows→`/srv/repo`) before cross-host spawn.
+ * Used for remote spawns so caller-platform `path.resolve` does not rewrite
+ * foreign absolute roots (Linux→`C:\repo`, Windows→`/srv/repo`).
  */
 export function isCrossPlatformAbsolutePath(value: string): boolean {
     return posix.isAbsolute(value) || win32.isAbsolute(value)
 }
 
+export type ResolveSpawnPeerDirectoryOptions = {
+    cwd?: string
+    /**
+     * When true, preserve POSIX/Windows absolute roots for the target host.
+     * When false (local spawn), use native `path.resolve` so Windows drive-less
+     * rooted paths like `\repo` bind to the caller's current drive.
+     */
+    crossHost: boolean
+}
+
 /**
- * Resolve spawn `directory` for CLI/MCP.
- * Preserve absolute paths on either OS; resolve only relative paths against
- * `cwd` (MCP session tree) or `process.cwd()`.
+ * Resolve spawn `directory` for CLI/MCP after the target machine is known.
  */
-export function resolveSpawnPeerDirectory(rawDirectory: string, cwd?: string): string {
+export function resolveSpawnPeerDirectory(
+    rawDirectory: string,
+    options: ResolveSpawnPeerDirectoryOptions
+): string {
     const trimmed = rawDirectory.trim()
     if (!trimmed) {
         return trimmed
     }
-    if (isCrossPlatformAbsolutePath(trimmed)) {
+    const cwd = options.cwd
+    if (options.crossHost && isCrossPlatformAbsolutePath(trimmed)) {
         return trimmed
     }
     return cwd ? resolvePath(cwd, trimmed) : resolvePath(trimmed)
@@ -466,11 +478,6 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
     if (!rawDirectory) {
         throw new SpawnPeerError('bad_args', 'directory is required')
     }
-    // Runner RPC resolves relative paths against the long-lived runner cwd
-    // (`hapi runner start`), not the calling CLI/MCP process. Anchor relative
-    // paths here (MCP passes cwd=session workingDirectory). Preserve absolute
-    // POSIX/Windows paths so cross-host spawns are not mangled by the caller OS.
-    const directory = resolveSpawnPeerDirectory(rawDirectory, options.cwd)
 
     const parent = options.parent !== undefined
         ? options.parent
@@ -545,7 +552,14 @@ export async function spawnPeer(options: SpawnPeerOptions): Promise<SpawnPeerRes
     // settings.machineId still counts as not-equal, so explicit remote targets
     // skip the local dir check.
     const crossHost = machineId !== localMachineId
-    // Local spawn requires the dir here; cross-machine dirs must exist on TARGET.
+    // Resolve directory only after local vs remote is known:
+    // - remote: preserve foreign absolute roots (mixed-OS --machine)
+    // - local: native path.resolve so Windows `\repo` binds to caller drive
+    // Relative paths always anchor here (MCP cwd / process.cwd), not runner cwd.
+    const directory = resolveSpawnPeerDirectory(rawDirectory, {
+        cwd: options.cwd,
+        crossHost,
+    })
     if (crossHost) {
         onProgress?.(
             `cross-machine spawn: local=${localMachineId || '(unset)'} target=${machineId} `
