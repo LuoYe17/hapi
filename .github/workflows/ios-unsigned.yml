@@ -4,6 +4,9 @@ name: ios-unsigned-ipa
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/ios-unsigned.yml'
 
 jobs:
   ipa:
@@ -43,3 +46,4 @@ jobs:
           name: Hapi-unsigned-ipa
           path: Hapi-unsigned.ipa
           retention-days: 30
+
